@@ -1,0 +1,6 @@
+.Rhistory
+.RData
+.Rproj.user/
+*.log
+.DS_Store
+.snakemake/

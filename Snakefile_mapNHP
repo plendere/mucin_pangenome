@@ -1,0 +1,197 @@
+##snakemake: flank-anchor method for VNTR exon sizes in primate assemblies
+## Auto-trims softmasked (repetitive) sequence from each anchor
+## Handles overlapping anchors (very small exons)
+## Per-mucin MAX_LOCUS_SPAN to prevent paralog mis-pairing
+import pandas as pd
+
+
+
+df = pd.read_table(
+    'manifest.txt',
+    header=0, index_col='Haplotype'
+)
+
+vntr_df = pd.read_table('VNTR_exons.txt', header=0)
+MUCINS = vntr_df['mucin'].tolist()
+REF = 'T2T-CHM13v2.fasta'
+
+EXON_BP    = 500
+MIN_ANCHOR = 100
+
+# Per-mucin max span between anchor inner edges (inner_gap).
+# Small values prevent paralog mis-pairing for clustered mucins.
+# DEFAULT covers large VNTRs in most mucin loci
+MAX_LOCUS_SPAN = {
+    'MUC20':   5000,
+    'MUC21':   5000,
+    'MUC22':   8000,
+    'DEFAULT': 200000,
+}
+
+def find_fasta(wildcards):
+    return df.at[wildcards.sample, 'Location']
+
+localrules: all, make_anchor_fasta, exon_sizes
+
+rule all:
+    input:
+        'exon_sizes.tsv'
+
+rule make_anchor_fasta:
+    input:
+        ref  = REF,
+        vntr = 'VNTR_exons.txt',
+    output:
+        fa  = 'anchors.fa',
+        log = 'anchors.log',
+    run:
+        import subprocess, re
+
+        def get_seq(ref, region):
+            return subprocess.check_output(
+                ['samtools', 'faidx', ref, region], text=True
+            ).strip().split('\n', 1)[1].replace('\n', '')
+
+        def trim_anchor(seq, side):
+            if side == 'up':
+                m = re.search(r'[a-z]+$', seq)
+                if m:
+                    seq = seq[:m.start()]
+                while seq and seq[-1].islower():
+                    seq = seq[:-1]
+            else:
+                m = re.search(r'^[a-z]+', seq)
+                if m:
+                    seq = seq[m.end():]
+                while seq and seq[0].islower():
+                    seq = seq[1:]
+            return seq, EXON_BP - len(seq)
+
+        written, skipped = [], []
+        with open(output.fa, 'w') as out, open(output.log, 'w') as log:
+            log.write('mucin\ttag\tregion\traw_len\ttrimmed_len\tusable_len\tstatus\n')
+            for _, r in vntr_df.iterrows():
+                mucin, chrom = r['mucin'], r['chr']
+                start, stop, strand = int(r['start']), int(r['stop']), r['dir']
+                for tag, region, side in [
+                    ('up',   f"{chrom}:{start}-{start + EXON_BP - 1}",   'up'),
+                    ('down', f"{chrom}:{stop - EXON_BP + 1}-{stop}", 'down'),
+                ]:
+                    raw_seq = get_seq(input.ref, region)
+                    trimmed_seq, n_trimmed = trim_anchor(raw_seq, side)
+                    usable = len(trimmed_seq)
+                    status = 'OK' if usable >= MIN_ANCHOR else 'TOO_SHORT'
+                    log.write(f"{mucin}\t{tag}\t{region}\t{len(raw_seq)}\t{n_trimmed}\t{usable}\t{status}\n")
+                    if usable >= MIN_ANCHOR:
+                        out.write(f">{mucin}_{tag} {region} strand={strand} usable={usable}\n{trimmed_seq}\n")
+                        written.append(f"{mucin}_{tag}")
+                    else:
+                        skipped.append(f"{mucin}_{tag} (only {usable} bp usable)")
+        print(f"Anchors written: {len(written)}")
+        if skipped:
+            print("Anchors skipped (< MIN_ANCHOR bp after trimming):")
+            for s in skipped: print(f"  {s}")
+
+rule map_anchors:
+    input:
+        anchors = 'anchors.fa',
+        target  = find_fasta,
+    output:
+        paf = 'paf/{sample}_anchors.paf',
+    threads: 4
+    resources:
+        mem = 8,
+        hrs = 4,
+    shell:
+        '''
+        tmp=$(mktemp -d -p ${{TMPDIR:-/tmp}} anchors.{wildcards.sample}.XXXXXX)
+        zcat -f {input.target} > $tmp/target.fa
+        minimap2 -c -t {threads} -k 15 -w 5 -A 2 -B 4 -O 4,24 -E 2,1 \
+            -N 10 --secondary=yes \
+            $tmp/target.fa {input.anchors} > {output.paf}
+        rm -rf $tmp
+        '''
+
+rule exon_sizes:
+    input:
+        pafs = expand('paf/{sample}_anchors.paf', sample=df.index),
+        log  = 'anchors.log',
+    output:
+        tsv = 'exon_sizes.tsv',
+    run:
+        from collections import defaultdict
+        import pandas as pd
+
+        alog   = pd.read_table(input.log)
+        usable = {f"{r['mucin']}_{r['tag']}": r['usable_len'] for _, r in alog.iterrows()}
+
+        out_rows = []
+        for sample in df.index:
+            hits = defaultdict(list)
+            with open(f'paf/{sample}_anchors.paf') as fh:
+                for line in fh:
+                    f = line.rstrip('\n').split('\t')
+                    if len(f) < 12:
+                        continue
+                    hits[f[0]].append({
+                        'qlen': int(f[1]), 'qstart': int(f[2]), 'qend': int(f[3]),
+                        'strand': f[4], 'tname': f[5],
+                        'tstart': int(f[7]), 'tend': int(f[8]),
+                        'nmatch': int(f[9]), 'alen': int(f[10]), 'mapq': int(f[11]),
+                    })
+
+            for mucin in MUCINS:
+                span_limit = MAX_LOCUS_SPAN.get(mucin, MAX_LOCUS_SPAN['DEFAULT'])
+                up_hits = hits.get(f'{mucin}_up', [])
+                dn_hits = hits.get(f'{mucin}_down', [])
+                if not up_hits or not dn_hits:
+                    out_rows.append((sample, mucin, 'NA', 'NA', 'NA', 'NA',
+                                     'missing_anchor', len(up_hits), len(dn_hits)))
+                    continue
+
+                best = None
+                for u in up_hits:
+                    for d in dn_hits:
+                        if u['tname'] != d['tname'] or u['strand'] != d['strand']:
+                            continue
+                        if u['strand'] == '+':
+                            inner_gap = d['tstart'] - u['tend']
+                        else:
+                            inner_gap = u['tstart'] - d['tend']
+                        if inner_gap > span_limit:
+                            continue
+                        score = u['nmatch'] + d['nmatch']
+                        if best is None or score > best['score']:
+                            best = {'u': u, 'd': d, 'inner_gap': inner_gap, 'score': score}
+
+                if best is None:
+                    out_rows.append((sample, mucin, 'NA', 'NA', 'NA', 'NA',
+                                     'no_valid_pair', len(up_hits), len(dn_hits)))
+                    continue
+
+                u, d = best['u'], best['d']
+                inner_gap = best['inner_gap']
+
+                if inner_gap >= 0:
+                    # Normal: VNTR sits between the two anchors
+                    exon_size = inner_gap + (u['tend'] - u['tstart']) + (d['tend'] - d['tstart'])
+                else:
+                    # Overlap: exon is smaller than 2*EXON_BP, anchors overlap each other
+                    if u['strand'] == '+':
+                        exon_size = d['tend'] - u['tstart']
+                    else:
+                        exon_size = u['tend'] - d['tstart']
+
+                if u['strand'] == '+':
+                    locus_start, locus_stop = u['tstart'], d['tend']
+                else:
+                    locus_start, locus_stop = d['tstart'], u['tend']
+
+                status = 'OK_overlap' if inner_gap < 0 else 'OK'
+                out_rows.append((sample, mucin, u['tname'], locus_start, locus_stop,
+                                 exon_size, status, len(up_hits), len(dn_hits)))
+
+        with open(output.tsv, 'w') as fh:
+            fh.write('sample\tmucin\tcontig\tlocus_start\tlocus_stop\texon_size\tstatus\tn_up_hits\tn_down_hits\n')
+            for r in out_rows:
+                fh.write('\t'.join(str(x) for x in r) + '\n')
