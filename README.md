@@ -18,6 +18,14 @@ There are four custom scripts:
 ### number_genomes_95concordance_locityper.R
 --> A command-line Rscript that estimates how many reference genomes are needed to reach 95% leave-one-out genotyping concordance for each locus, based on subsampling experiments at varying reference panel sizes. For every (locus, metric) combination, it fits a 3-parameter logistic saturation model — concordance(n) = A / (1 + exp(-k·(n − n0))) — using minpack.lm::nlsLM, then solves analytically for the panel size at which the fitted curve crosses the threshold. Each locus is classified as already achieved, achievable (with the extrapolated n95), or plateau (asymptote below threshold). Outputs include a per-fit results TSV, a dense prediction grid for plotting, and a faceted PDF showing observed points, fitted curves, and the 95% threshold line.
 
+### CF_association_testing_allmodels.R
+--> A command-line Rscript that tests whether mucin VNTR variations associated with the continuous KNoRMA phenotype in the Cystic Fibrosis Foundation's WGS dataset. each model adjusts for sex and ancestry PCs (1-10) computed previously using somalier. The script runs four models:
+1.) Haplogroup dosage: linear regression of KNoRMA on the number of copies (0, 1, or 2) of each haplogroup, fit separately for each mucin and haplogroup.
+2.) VNTR length: linear regression of KNoRMA on z-scored summed VNTR length (the sum of the two haplotype lengths, standardized per mucin).
+3.) Binned median-split length dosage: linear regression of KNoRMA on the number of haplotypes (0, 1, or 2) falling in each median-split length bin (short or long).
+4.) Binned length-extremes dosage: linear regression of KNoRMA on the number of haplotypes (0, 1, or 2) falling in the bottom 20%, middle 60%, or top 20% of the per-mucin length distribution.
+
+
 
 
 ## Required tools/packages
@@ -41,6 +49,10 @@ dplyr — data manipulation
 tidyr — long-format reshaping
 ggplot2 — diagnostic plot
 minpack.lm — provides nlsLM() for the Levenberg–Marquardt logistic fit
+
+### CF_association_testing_allmodels.R
+dplyr - data manipulation
+broom - tidy() and glance() to extract coefficients and model fit from lm()
 
 
 ## Help/Contact
