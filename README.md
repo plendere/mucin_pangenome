@@ -4,7 +4,7 @@ This is a dedicated repo for custom scripts used to analyze complex structural v
 
 ## Description
 
-There are four custom scripts: 
+There are five custom scripts: 
 
 ### Snakefile_mapNHP
 --> A Snakemake pipeline that measures VNTR-containing exon sizes in non-human primate (and other) genome assemblies using a flank-anchor approach. For each mucin locus, the pipeline extracts upstream and downstream flanking sequences from the T2T-CHM13v2 reference, automatically trims softmasked (repetitive) bases from the inner edges to produce clean anchors, and discards anchors shorter than a minimum length. Anchors are mapped to each target assembly with minimap2 (allowing secondary alignments), and best anchor pairs are selected per locus using a per-mucin maximum span constraint to prevent paralog mis-pairing in clustered mucin regions. The pipeline reports exon size, locus coordinates, and a status flag (including a special case for very small exons where the two anchors overlap) in a single TSV.
